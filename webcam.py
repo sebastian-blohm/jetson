@@ -7,15 +7,115 @@ import numpy as np
 import cv2
 import datetime
 
-# TODO: gstreamer pipeline for external camera
-# TODO: put into own project
+# DONE: put into own project
 # TODO: detect state changes explicitly
 # TODO: break loop down into methods
 # TODO: play buffer back and forth
 # TODO: enable buffer for two faces
 # TODO: hide debug output
 # TODO: explicit action for enabling buffer (via web server?)
+# TODO: gstreamer pipeline for external camera
 
+class State:    
+    show_live = 0
+    show_buffered = 1
+    show_preset = 2
+    display_to_string = ["Live", "Buffered", "Preset"]
+
+    reason_init = 100
+    reason_user = 101
+    reason_no_face = 102
+    reason_face = 103
+    reason_multiple_faces = 104    
+    
+    def __init__(self, buffer_start, buffer_end, frame_tolerance, non_live_default=State.show_buffered):
+        self.display = State.show_live
+        self.reason = State.reason_init
+        self.buffer_start = buffer_start
+        self.buffer_end = buffer_end
+        self.buffer_index = 0 
+        self.read_step = 1 # -1 for decrement
+        self.frame_tolerance = frame_tolerance
+        self.frame_count = 0
+        self.last_fps_frame = 0
+        self.last_timestamp = datetime.datetime.now()
+        self.last_frame_with_faces = [ 0, 0, 0]
+        self.buffer_write_index = -1
+        self.buffer_full = False
+        self.non_live_default = non_live_default
+    
+    def next_buffer_read_index(self):
+        self.buffer_index = self.buffer_index + self.read_step
+        if self.buffer_index >= self.buffer_end:
+            self.buffer_index = self.buffer_end -1
+            self.read_step = -1
+        if self.buffer_index < self.buffer_start:
+            self.buffer_index = self.buffer_start
+            self.read_step = 1
+        return self.buffer_index
+
+    def next_buffer_write_index(self):
+        self.buffer_write_index += 1
+        if self.buffer_write_index >= self.buffer_end:
+            self.buffer_write_index = self.buffer_start
+            self.buffer_full = True
+        return self.buffer_write_index
+
+    def observed_face_count(self, faces):
+        self.last_frame_with_faces[min(faces,2)] = self.frame_count
+
+        if self.reason == State.reason_user:
+            return
+
+        if self.reason == State.reason_init:
+            if self.buffer_full:
+                self.reason = State.reason_face
+                self.display = State.show_live
+            else:
+                return
+
+        if self.display == State.show_live:
+            if self.frame_count - self.last_frame_with_faces[1] > self.frame_tolerance:
+                self.display = self.non_live_default
+                self.reason = State.reason_no_face if self.last_frame_with_faces[0] > self.last_frame_with_faces[2] else State.reason_multiple_faces
+        else:
+            if self.frame_count - self.last_frame_with_faces[1] < self.frame_tolerance:
+                self.display = self.show_live
+                self.reason = self.reason_face
+
+    def register_frame(self):
+        self.frame_count += 1
+        
+    def should_run_face_reco(self):
+        return self.reason != State.reason_user
+
+    def get_fps(self):
+        new_timestamp = datetime.datetime.now()
+        num_frames = self.frame_count - self.last_fps_frame
+        fps = num_frames / (new_timestamp - self.last_timestamp).total_seconds()
+        if num_frames > self.frame_tolerance:
+            self.last_timestamp = new_timestamp
+            self.last_fps_frame = self.frame_count
+        return fps
+
+    def get_overlay_text(self):
+        return State.display_to_string[self.display] + "\n" + str(self.frame_count) + " FPS: " + str(round(self.get_fps()))
+        
+    def user_request_live(self):
+        self.display = State.show_live
+        self.reason = State.reason_user
+
+    def user_request_buffered(self):
+        self.display = State.show_buffered
+        self.reason = State.reason_user
+    
+    def user_request_preset(self):
+        self.display = State.show_preset
+        self.reason = State.reason_user
+    
+    def user_request_auto(self):
+        self.user_request_live(self)
+        self.reason = State.reason_face
 
 def gstreamer_pipeline(
     capture_width=3280,
