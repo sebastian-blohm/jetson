@@ -17,3 +17,5 @@ https://forums.developer.nvidia.com/t/monitor-gpu-usage/72250
 https://pypi.org/project/jetson-stats/1.6.2/
 
 https://kamarada.github.io/en/2019/07/14/using-git-with-ssh-keys/#.X-y0lNmYUnU
+
+https://www.geeksforgeeks.org/python-opencv-cv2-imshow-method/
