@@ -20,3 +20,7 @@ https://kamarada.github.io/en/2019/07/14/using-git-with-ssh-keys/#.X-y0lNmYUnU
 https://unix.stackexchange.com/questions/56083/how-to-write-a-shell-script-that-gets-executed-on-login
 
 https://www.geeksforgeeks.org/python-opencv-cv2-imshow-method/
+
+http://zetcode.com/python/multiprocessing/ (esp. "Sharing state between processes")
+
+https://stackoverflow.com/questions/59158964/gstreamer-cant-capture-video-from-usb-camera
