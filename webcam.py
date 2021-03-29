@@ -100,11 +100,17 @@ class State:
 
     def reset(self):
         #         self.ring_start = 0 # TODO: the first valid frame in the ring memory
-        self.ring_end = 0 # TODO: the most recent valid frame in ring memory
+        # self.ring_end = 0 # TODO: the most recent valid frame in ring memory
         # timestep are pointers in frames relative to the most recent frame stored
         self.read_from = 0
-        self.last_recording_start = 0 # if ring is under-full, option to run the old playback
-        self.second_last_recording_start = 0
+        self.write_to = 0
+        self.old_loop_start = 0
+        self.old_loop_end = self.buffer_size - 1
+        self.new_loop_start = self.buffer_size - 1
+        self.new_loop_end = self.buffer_size - 1
+        self.read_old_loop = True
+        # self.last_recording_start = 0 # if ring is under-full, option to run the old playback
+        # self.second_last_recording_start = 0
         self.read_step = -1 # -1 for decrement
         self.frame_count = 0
         self.last_fps_frame = 0
@@ -125,10 +131,71 @@ class State:
         return self.buffer_size
     
     def next_buffer_read_index(self):
-        return self.read_from % self.buffer_size
+        # trim result into range 
+        result = self.read_from 
+        self.read_from += self.read_step
+        if (self.read_from >= self.buffer_size): 
+            self.read_from -= self.buffer_size
+        if (self.read_from < 0):
+            self.read_from += self.buffer_size
+        if (self.read_from == self.read_loop_start()): 
+            self.read_step = 1
+            print("reading forward (%i, %i)"% (self.read_loop_start(), self.read_loop_end()))
+        if (self.read_from == self.read_loop_end()): 
+            self.read_step = -1
+            print("reading backward (%i, %i)"% (self.read_loop_start(), self.read_loop_end()))
+
+        return result
 
     def next_buffer_write_index(self):
-        return self.frame_count % self.buffer_size
+        # determine result
+        result = self.write_to
+        # update pointers
+        self.write_to += 1
+        if (self.write_to >= self.buffer_size): 
+            self.write_to -= self.buffer_size
+        if (self.write_to < 0):
+            self.write_to += self.buffer_size
+
+
+        self.old_loop_start = self.write_to if self.old_loop_start == result else self.old_loop_start
+        self.old_loop_end = self.write_to if self.old_loop_end == result else self.old_loop_end
+        if (self.old_loop_start == self.old_loop_end):
+            self.new_loop_start = self.write_to
+        # when the new loop becomes bigger, make it the read loop
+        if self.read_old_loop:
+            self.new_loop_end = result   
+            old_loop_length = self.old_loop_end - self.old_loop_start 
+            if old_loop_length < 0:
+                old_loop_length += self.buffer_size
+
+            new_loop_length = self.new_loop_end - self.new_loop_start 
+            if new_loop_length < 0:
+                new_loop_length += self.buffer_size
+
+            if old_loop_length <= new_loop_length:
+                print("reading new loop (%i <= %i)" %(old_loop_length, new_loop_length))
+                print("old: (%i,%i), new: (%i,%i)" %(self.old_loop_start, self.old_loop_end, self.new_loop_start, self.new_loop_end))
+                self.read_old_loop = False
+        else:
+            self.new_loop_end = result - self.frames_to_skip
+            if self.new_loop_end < 0:
+                self.new_loop_end += self.buffer_size
+
+        return result
+
+    def read_loop_start(self):
+        if self.read_old_loop:
+            return self.old_loop_start
+        else:
+            return self.new_loop_start
+
+    def read_loop_end(self):
+        if self.read_old_loop:
+            return self.old_loop_end
+        else:
+            return self.new_loop_end
+
 
     def observed_face_count(self, faces):
         self.lock.acquire()
@@ -148,8 +215,8 @@ class State:
                 return
 
         if self.display == State.show_live:
-            # switch to buffer if we have not one face in the image and we haven't switched to buffer too often recently
-            if self.frame_count - self.last_frame_with_faces[1] > self.frame_tolerance and self.second_last_recording_start + self.buffer_size < self.frame_count:
+            # switch to buffer if we have not one face in the image 
+            if self.frame_count - self.last_frame_with_faces[1] > self.frame_tolerance:
                 self.switch_state(self.non_live_default)
                 self.reason = State.reason_no_face if self.last_frame_with_faces[0] > self.last_frame_with_faces[2] else State.reason_multiple_faces
                 print("Detected 0 or 2 faces @"+str(self.frame_count))
@@ -160,14 +227,7 @@ class State:
                 print("Detected 1 face @"+str(self.frame_count))
         self.lock.release()
 
-    def register_frame(self):
-        if self.display == State.show_buffered:
-            self.read_from = self.read_from + self.read_step
-            if self.read_from <= self.ring_end - self.buffer_size + 1 or self.read_from == self.second_last_recording_start + 1:
-                self.read_step = 1
-            if self.read_from >= self.ring_end - self.frames_to_skip or self.read_from == self.last_recording_start - self.frames_to_skip:
-                self.read_step = -1
-                          
+    def register_frame(self):                         
         self.frame_count += 1
         
     def should_run_face_reco(self):
@@ -206,34 +266,43 @@ class State:
         print("switching state to: " + str(new_state))
         self.last_face_bounds = (0, 0, 0, 0)
         if new_state == State.show_buffered:
-            self.display = self.non_live_default                
-            # pick the most recent recording, if it is long enough (that is longer than half the buffer or the previous recording)
-            if self.frame_count - self.last_recording_start > min(self.buffer_size / 2, self.last_recording_start - self.second_last_recording_start):
-                print("picking recent loop because %i > %i or %i (%i - %i)" %( self.frame_count - self.last_recording_start, self.buffer_size / 2, self.last_recording_start - self.second_last_recording_start, self.last_recording_start,  self.second_last_recording_start))
-                self.read_from = self.frame_count - self.frames_to_skip
-                self.ring_end = self.frame_count
-            else: 
-                self.read_from = self.ring_end - self.frames_to_skip # pick the longer loop
-                # self.ring_end = self.second_last_recording_start
-                self.second_last_recording_start += (self.frame_count - self.last_recording_start) # don't use part of old buffer area that is now overwritten
-
-            self.read_step = -1
+            self.display = self.non_live_default       
+            # TODO: exclude recent time from new loop and make sure we play backward
+            if self.read_old_loop:
+                print("starting reading forwards")
+                self.read_from = self.old_loop_start
+                self.read_step = 1
+            else:
+                print("starting reading backwards")
+                self.read_from = self.write_to -1
+                self.read_step = -1                
         elif new_state == State.show_preset:
             self.display = State.show_preset            
         elif new_state == State.show_live:
             self.display = self.show_live            
-            self.second_last_recording_start = self.last_recording_start
-            self.last_recording_start = self.frame_count
+            # new loop becomes old loop (if it is bigger), otherwise kill keep only the old loop
+            if not self.read_old_loop:
+                self.old_loop_start = self.new_loop_start
+                self.old_loop_end = self.new_loop_end
+                self.read_old_loop = True
+                print("reading old loop")
+
+            self.new_loop_start = self.old_loop_end + 1
+            if self.new_loop_start >= self.buffer_size:
+                self.new_loop_start -= self.buffer_size
+            self.new_loop_end = self.new_loop_start
+            self.write_to = self.new_loop_start
         else:
             raise ValueError("Invalid state specified")
     
     def draw_loop_info(self, img):
         # start_point = max(self.ring_end - self.buffer_size + 1, self.second_last_recording_start + 1)
-        cv2.putText(img, ">",(self.ring_end - self.buffer_size + 1,10),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
-        cv2.putText(img, ">",(self.second_last_recording_start + 1,10),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
-        cv2.putText(img, "<",(self.ring_end - self.frames_to_skip,10),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
-        cv2.putText(img, "X",(self.ring_end, 10),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
-        cv2.putText(img, "|",(self.read_from,10),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
+        cv2.putText(img, ">",(self.old_loop_start,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,255 if self.read_old_loop else 0))
+        cv2.putText(img, ">",(self.new_loop_start,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
+        cv2.putText(img, "<",(self.old_loop_end, 20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,255 if self.read_old_loop else 0))
+        cv2.putText(img, "<",(self.new_loop_end,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
+        cv2.putText(img, "X",(self.write_to, 20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
+        cv2.putText(img, "|",(self.read_from,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255))
 
 def gstreamer_pipeline(
     capture_width=3280,
@@ -440,7 +509,7 @@ def face_loop(state):
 
 if __name__ == "__main__":
     flip_method = 6 # 6 for vertical flip (if upside down) 4 for horizontal flip
-    state = State(buffer_size=120, frames_to_skip=30)
+    state = State(buffer_size=140, frames_to_skip=50)
     face_cascade = cv2.CascadeClassifier(
         "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
     )
